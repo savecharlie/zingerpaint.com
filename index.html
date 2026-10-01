@@ -223,13 +223,14 @@ input[type=number] { width: 5.2rem; padding: 0.4rem 0.5rem; background: var(--in
           <li>The blank carries its own 0.04 mm layer height. Keep the first layer at 0.2 mm.</li>
           <li>If Orca refuses the 0.04 mm layers, lower the printer profile’s minimum layer height
             (<code>min_layer_height</code>) to 0.04.</li>
-          <li>Slice it and export plain G-code (a <code>.gcode</code> file).</li>
+          <li>Slice it and export either plain G-code (<code>.gcode</code>) or the sliced plate (<code>.gcode.3mf</code>).
+            You get the same kind back, so a <code>.gcode.3mf</code> can go straight to a Bambu printer.</li>
         </ul>
       </li>
       <li id="st3" class="off">
         <h3><span>3</span>Bring the G-code back</h3>
-        <label class="drop" id="drop2"><input type="file" id="gcode" accept=".gcode,.gco,.g">
-          <span id="drop2Text"><b>Drop the sliced G-code here</b></span></label>
+        <label class="drop" id="drop2"><input type="file" id="gcode" accept=".gcode,.gco,.g,.3mf">
+          <span id="drop2Text"><b>Drop the sliced G-code here</b> (.gcode or .gcode.3mf)</span></label>
         <div class="report" id="report" aria-live="polite"></div>
         <p id="dlRow" hidden><a class="btn solid" id="dl" download>Download your print</a></p>
         <p class="cap" id="dlNote" hidden>Look at it in your slicer’s G-code preview before you print it.</p>
@@ -333,8 +334,8 @@ input[type=number] { width: 5.2rem; padding: 0.4rem 0.5rem; background: var(--in
   <p>Part of <a href="https://spandrel.locomot.io">Spandrel</a>. Tucson, Arizona.</p>
 </footer>
 
-<script src="zp_curve.js?v=2"></script>
-<script src="zp.js?v=2"></script>
+<script src="zp_curve.js?v=3"></script>
+<script src="zp.js?v=3"></script>
 <script>
 (() => {
   const $ = id => document.getElementById(id);
@@ -428,7 +429,7 @@ input[type=number] { width: 5.2rem; padding: 0.4rem 0.5rem; background: var(--in
 
   function resetResult() {
     $('report').innerHTML = ''; $('dlRow').hidden = true; $('dlNote').hidden = true;
-    $('drop2Text').innerHTML = '<b>Drop the sliced G-code here</b>';
+    $('drop2Text').innerHTML = '<b>Drop the sliced G-code here</b> (.gcode or .gcode.3mf)';
   }
 
   $('photo').addEventListener('change', e => { const f = e.target.files[0]; if (f) loadImage(URL.createObjectURL(f), f.name).catch(err => { busy(false); $('dropText').textContent = err.message; }); });
@@ -456,13 +457,11 @@ input[type=number] { width: 5.2rem; padding: 0.4rem 0.5rem; background: var(--in
     const f = e.target.files[0]; if (!f || !S.fm) return;
     resetResult();
     $('drop2Text').innerHTML = `<b>${f.name}</b>`;
-    const head = new Uint8Array(await f.slice(0, 2).arrayBuffer());
-    if (head[0] === 0x50 && head[1] === 0x4b) {
-      $('report').innerHTML = '<p class="bad">That is a project file (.3mf), not G-code. Export plain G-code from the slicer and drop that here.</p>'; return;
-    }
+    const head = new Uint8Array(await f.slice(0, 2).arrayBuffer()), zipped = head[0] === 0x50 && head[1] === 0x4b;
     busy(true); await tick();
     try {
-      const text = await f.text(), info = ZP.inspect(text), problems = ZP.check(info, S.fm.W, S.fm.H);
+      const pkg = zipped ? await ZP.openPackage(await f.arrayBuffer()) : null;   // a sliced .gcode.3mf comes back as one
+      const text = pkg ? pkg.text : await f.text(), info = ZP.inspect(text), problems = ZP.check(info, S.fm.W, S.fm.H);
       if (problems.length) { $('report').innerHTML = problems.map(p => `<p class="bad">${p}</p>`).join(''); return; }
       const b = info.box, OX = (b[0] + b[2]) / 2 - S.fm.W / 2, OY = (b[1] + b[3]) / 2 - S.fm.H / 2;
       const P = ZP.plate(S.fm, OX, OY), d = dir(), L = ZP.layers(P, d);
@@ -470,14 +469,17 @@ input[type=number] { width: 5.2rem; padding: 0.4rem 0.5rem; background: var(--in
       const IR = $('iron').checked ? ZP.ironing(P, ZP.stack(P, L), d) : null;
       const R = ZP.rewrite(text, P, L, IR);
       if (R.layers.length !== ZP.N) throw new Error(`Only ${R.layers.length} of ${ZP.N} white layers could be written.`);
-      const mins = info.otherMin !== null ? Math.round(info.otherMin + (ZP.ourSeconds(L) + (IR ? IR.seconds : 0)) / 60) : null;
+      const secs = info.otherMin !== null ? info.otherMin * 60 + ZP.ourSeconds(L) + (IR ? IR.seconds : 0) : null;
+      const mins = secs === null ? null : Math.round(secs / 60);
       const time = mins === null ? '' : ` About ${mins >= 60 ? Math.floor(mins / 60) + ' h ' : ''}${mins % 60} min to print.`;
       $('report').innerHTML = `<p class="good">Ten white layers written in ${d} lines${IR ? ', then ironed' : ''}, ` +
         `${R.removed.toLocaleString()} of the slicer’s white moves replaced.${time}</p>`;
       const dl = $('dl');
       if (dl.href) URL.revokeObjectURL(dl.href);
-      dl.href = URL.createObjectURL(new Blob([R.text], { type: 'text/plain' }));
-      dl.download = `${S.name}_zingerpaint_${d}.gcode`;
+      const blob = pkg ? new Blob([await ZP.repack(pkg, R.text, secs)], { type: 'application/octet-stream' })
+                       : new Blob([R.text], { type: 'text/plain' });
+      dl.href = URL.createObjectURL(blob);
+      dl.download = `${S.name}_zingerpaint_${d}.gcode${pkg ? '.3mf' : ''}`;
       $('dlRow').hidden = false; $('dlNote').hidden = false;
     } catch (err) {
       $('report').innerHTML = `<p class="bad">${err.message}</p>`;

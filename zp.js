@@ -622,7 +622,115 @@ Iris (Opus 5.5) with Ivy, Sep 30 2026.
                 ['Metadata/model_settings.config', settings]]);
   }
 
-  const ZP = { BASE, H_L, N, PITCH, PPM, BEAD, curve, Yof, interp, fmap, plate, families, order, resample, pieces, block,
+  // ---------- the slicer's own package: .gcode.3mf in, .gcode.3mf out ----------
+  /* A sliced .gcode.3mf (Orca's / Bambu's "export plate sliced file") is a zip whose Metadata/plate_N.gcode is the job,
+     next to plate_N.gcode.md5 (uppercase hex) and slice_info.config (the printer's predicted seconds). Swapping only
+     those three keeps everything a slicer or a Bambu printer needs to open and send it. */
+  async function inflate(bytes) {
+    const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(s).arrayBuffer());
+  }
+  async function deflate(bytes) {
+    const s = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(s).arrayBuffer());
+  }
+  async function unzip(buf) {
+    const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf), dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    let e = b.length - 22;
+    while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+    if (e < 0) throw new Error('That file is not a readable 3mf (no zip directory).');
+    const count = dv.getUint16(e + 10, true);
+    let p = dv.getUint32(e + 16, true);
+    const out = [], dec = new TextDecoder();
+    for (let i = 0; i < count; i++) {
+      if (dv.getUint32(p, true) !== 0x02014b50) throw new Error('That 3mf has a damaged directory.');
+      const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+      const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+      const lho = dv.getUint32(p + 42, true), name = dec.decode(b.subarray(p + 46, p + 46 + nlen));
+      const start = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
+      const raw = b.subarray(start, start + csize);
+      if (!name.endsWith('/')) out.push({ name, data: method === 0 ? raw.slice() : method === 8 ? await inflate(raw) : null, method });
+      p += 46 + nlen + xlen + clen;
+    }
+    if (out.some(f => !f.data)) throw new Error('That 3mf uses a compression this page cannot read.');
+    return out;
+  }
+  async function zipDeflated(files) {           // files: [{name, data}] -> deflated zip
+    const enc = new TextEncoder(), parts = [], central = [];
+    let off = 0;
+    for (const f of files) {
+      const nb = enc.encode(f.name), crc = crc32(f.data), comp = await deflate(f.data);
+      const lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(8, 8, true); lh.setUint16(12, 0x5D3E, true);
+      lh.setUint32(14, crc, true); lh.setUint32(18, comp.length, true); lh.setUint32(22, f.data.length, true);
+      lh.setUint16(26, nb.length, true);
+      parts.push(new Uint8Array(lh.buffer), nb, comp);
+      const ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(10, 8, true);
+      ch.setUint16(14, 0x5D3E, true); ch.setUint32(16, crc, true); ch.setUint32(20, comp.length, true);
+      ch.setUint32(24, f.data.length, true); ch.setUint16(28, nb.length, true); ch.setUint32(42, off, true);
+      central.push(new Uint8Array(ch.buffer), nb);
+      off += 30 + nb.length + comp.length;
+    }
+    const csize = central.reduce((s, a) => s + a.length, 0), end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+    end.setUint32(12, csize, true); end.setUint32(16, off, true);
+    const all = parts.concat(central, [new Uint8Array(end.buffer)]);
+    const out = new Uint8Array(all.reduce((s, a) => s + a.length, 0));
+    let q = 0; for (const a of all) { out.set(a, q); q += a.length; }
+    return out;
+  }
+
+  function md5(bytes) {                         // RFC 1321; returns uppercase hex, the way Bambu writes plate_N.gcode.md5
+    const K = new Int32Array(64), S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+    for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) | 0;
+    const n = bytes.length, words = ((n + 8) >>> 6) + 1, M = new Int32Array(words * 16);
+    for (let i = 0; i < n; i++) M[i >> 2] |= bytes[i] << ((i % 4) * 8);
+    M[n >> 2] |= 0x80 << ((n % 4) * 8);
+    M[words * 16 - 2] = (n * 8) | 0; M[words * 16 - 1] = Math.floor(n / 536870912) | 0;
+    let a0 = 0x67452301, b0 = 0xefcdab89 | 0, c0 = 0x98badcfe | 0, d0 = 0x10325476;
+    for (let o = 0; o < M.length; o += 16) {
+      let A = a0, B = b0, C = c0, D = d0;
+      for (let i = 0; i < 64; i++) {
+        let F, g;
+        if (i < 16) { F = (B & C) | (~B & D); g = i; }
+        else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+        else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) % 16; }
+        else { F = C ^ (B | ~D); g = (7 * i) % 16; }
+        const s = S[(i >> 4) * 4 + (i % 4)], t = (A + F + K[i] + M[o + g]) | 0;
+        A = D; D = C; C = B; B = (B + ((t << s) | (t >>> (32 - s)))) | 0;
+      }
+      a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+    }
+    let hex = '';
+    for (const v of [a0, b0, c0, d0]) for (let i = 0; i < 4; i++) hex += ((v >>> (i * 8)) & 0xff).toString(16).padStart(2, '0');
+    return hex.toUpperCase();
+  }
+
+  /* Open a sliced package: the first plate's gcode as text, and everything needed to put a new one back. */
+  async function openPackage(buf) {
+    const files = await unzip(buf);
+    const g = files.find(f => /^Metadata\/plate_\d+\.gcode$/.test(f.name));
+    if (!g) throw new Error('No sliced plate in that 3mf. Slice it first, then export the plate as a sliced file (.gcode.3mf).');
+    if (files.filter(f => /^Metadata\/plate_\d+\.gcode$/.test(f.name)).length > 1)
+      throw new Error('That 3mf has more than one sliced plate. Put the blank on its own plate.');
+    return { files, gname: g.name, text: new TextDecoder().decode(g.data) };
+  }
+  async function repack(pkg, text, seconds) {
+    const enc = new TextEncoder(), gbytes = enc.encode(text);
+    const files = pkg.files.map(f => {
+      if (f.name === pkg.gname) return { name: f.name, data: gbytes };
+      if (f.name === pkg.gname + '.md5') return { name: f.name, data: enc.encode(md5(gbytes)) };
+      if (f.name === 'Metadata/slice_info.config' && seconds) {
+        const s = new TextDecoder().decode(f.data).replace(/(<metadata key="prediction" value=")\d+("\/>)/, `$1${Math.round(seconds)}$2`);
+        return { name: f.name, data: enc.encode(s) };
+      }
+      return f;
+    });
+    return zipDeflated(files);
+  }
+
+  const ZP = { md5, unzip, openPackage, repack, BASE, H_L, N, PITCH, PPM, BEAD, curve, Yof, interp, fmap, plate, families, order, resample, pieces, block,
                layers, stack, stepBack, lineView, boxFilter, ironing, inspect, check, rewrite, ourSeconds, blank3mf, zip, crc32, resize, gaussian };
   if (typeof module !== 'undefined' && module.exports) module.exports = ZP; else root.ZP = ZP;
 })(typeof window !== 'undefined' ? window : globalThis);
