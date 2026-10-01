@@ -331,6 +331,48 @@ Iris (Opus 5.5) with Ivy, Sep 30 2026.
     return { w, h, grey: out };
   }
 
+  /* The line-level look (frame/mockup_lines.py, made when Ivy said "The layer lines need to be clearer"): every line
+     drawn at the bead's real 0.47 mm at R px/mm, a spot's lightness set by how many layers stack there (the v6 treads),
+     then each 1 mm neighbourhood scaled to what the MEASURED v7 curve says it reads as -- the drawn gaps are pure black,
+     but real white plastic spreads light into them, so without the gain it reads too dark. Returns 8-bit sRGB. */
+  function lineView(P, L, R) {
+    const w = Math.round(P.W * R), h = Math.round(P.H * R), n = w * h, C = curve();
+    const cnt = new Uint8Array(n), cov = new Uint8Array(n), m = new Uint8Array(n);
+    for (let k = 0; k < L.length; k++) {
+      m.fill(0); stroke(m, w, h, P, L[k], BEAD, R);
+      for (let i = 0; i < n; i++) cnt[i] += m[i];
+      m.fill(0); stroke(m, w, h, P, L[k], PITCH, R);
+      for (let i = 0; i < n; i++) cov[i] += m[i];
+    }
+    const size = Math.max(1, Math.round(R));       // 1 mm box; linear, so one filter over the summed layers
+    const feff = boxFilter(cov, w, h, size), Y8 = new Float32Array(n);
+    const TY = [4, 13, 24, 33, 42, 49, 55, 61, 67, 71, 72].map(Yof);
+    for (let i = 0; i < n; i++) Y8[i] = TY[Math.min(cnt[i], 10)];
+    const mean = boxFilter(Y8, w, h, size), out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const gain = Math.min(4, Math.max(0.5, Yof(interp(feff[i], C.f, C.L)) / Math.max(mean[i], 1e-4)));
+      const Y = Math.min(1, Y8[i] * gain);
+      out[i] = Math.round(255 * (Y <= 0.0031308 ? 12.92 * Y : 1.055 * Math.pow(Y, 1 / 2.4) - 0.055));
+    }
+    return { w, h, grey: out, R };
+  }
+
+  function boxFilter(a, w, h, size) {             // uniform_filter: window [i - size/2, i + size - size/2), reflected
+    const half = size >> 1, row = new Float32Array(w * h), out = new Float32Array(w * h);
+    const refl = (i, len) => { while (i < 0 || i >= len) i = i < 0 ? -i - 1 : 2 * len - i - 1; return i; };
+    for (let y = 0; y < h; y++) {
+      const o = y * w; let s = 0;
+      for (let i = -half; i < size - half; i++) s += a[o + refl(i, w)];
+      for (let x = 0; x < w; x++) { row[o + x] = s / size; s += a[o + refl(x + size - half, w)] - a[o + refl(x - half, w)]; }
+    }
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let i = -half; i < size - half; i++) s += row[refl(i, h) * w + x];
+      for (let y = 0; y < h; y++) { out[y * w + x] = s / size; s += row[refl(y + size - half, h) * w + x] - row[refl(y - half, h) * w + x]; }
+    }
+    return out;
+  }
+
   // ---------- ironing (iron.py + iron2.py) ----------
   function ironing(P, S, whiteDir) {
     const { w: W, h: H, top } = S;
@@ -581,6 +623,6 @@ Iris (Opus 5.5) with Ivy, Sep 30 2026.
   }
 
   const ZP = { BASE, H_L, N, PITCH, PPM, BEAD, curve, Yof, interp, fmap, plate, families, order, resample, pieces, block,
-               layers, stack, stepBack, ironing, inspect, check, rewrite, ourSeconds, blank3mf, zip, crc32, resize, gaussian };
+               layers, stack, stepBack, lineView, boxFilter, ironing, inspect, check, rewrite, ourSeconds, blank3mf, zip, crc32, resize, gaussian };
   if (typeof module !== 'undefined' && module.exports) module.exports = ZP; else root.ZP = ZP;
 })(typeof window !== 'undefined' ? window : globalThis);
