@@ -469,7 +469,11 @@ Iris (Opus 5.5) with Ivy, Sep 30 2026.
     const zs = new Set();
     let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity, nWhite = 0;
     let r0 = null, rWhiteStart = null, rWhiteEnd = null, lastR = null, inWhite = false;
+    let tool = 0;                                  // the filament in force: last bare T<n>, n < 16 (T255/T1000 are not filaments)
+    const baseTools = new Set(), whiteTools = new Set();
     for (const raw of lines) {
+      const tm = /^\s*T(\d+)\s*(;|$)/.exec(raw);
+      if (tm && +tm[1] < 16) tool = +tm[1];
       const lz = layerZ(raw);
       if (lz !== null) {
         z = lz; zs.add(z);
@@ -483,15 +487,17 @@ Iris (Opus 5.5) with Ivy, Sep 30 2026.
       const nx = getv(s, 'X'), ny = getv(s, 'Y'), e = getv(s, 'E');
       const tx = nx !== null ? nx : x, ty = ny !== null ? ny : y;
       if (isWhiteZ(z) && e !== null && e > 0 && x !== null && (nx !== null || ny !== null)) {
-        nWhite++;
+        nWhite++; whiteTools.add(tool);
         bx0 = Math.min(bx0, x, tx); bx1 = Math.max(bx1, x, tx); by0 = Math.min(by0, y, ty); by1 = Math.max(by1, y, ty);
       }
+      if (z !== null && z <= BASE + 0.005 && e !== null && e > 0 && (nx !== null || ny !== null)) baseTools.add(tool);
       x = tx; y = ty;
     }
     if (inWhite && rWhiteEnd === null) rWhiteEnd = lastR;
     const white = [...zs].filter(isWhiteZ).sort((a, b) => a - b);
     const otherMin = (r0 !== null && rWhiteStart !== null) ? (r0 - rWhiteStart) + (rWhiteEnd || 0) : null;
-    return { white, relative: rel, nWhite, box: nWhite ? [bx0, by0, bx1, by1] : null, hasBase: zs.has(BASE), otherMin };
+    return { white, relative: rel, nWhite, box: nWhite ? [bx0, by0, bx1, by1] : null, hasBase: zs.has(BASE), otherMin,
+             baseTools: [...baseTools], whiteTools: [...whiteTools] };
   }
 
   /* Check the gcode against the blank this picture needs; returns plain-words problems (empty = fine). */
@@ -502,6 +508,9 @@ Iris (Opus 5.5) with Ivy, Sep 30 2026.
     if (!info.hasBase || want.some(z => !info.white.includes(z)))
       bad.push(`The white has to be ten layers of 0.04 mm on top of a 0.28 mm base. Found white layers at ${info.white.join(', ') || 'none'}. Set the layer height to 0.04 and the first layer to 0.2.`);
     if (!info.box) bad.push('No white printing found in the gcode. Is the white part on filament 2?');
+    else if (info.baseTools && info.baseTools.some(t => info.whiteTools.includes(t)))
+      bad.push(`The black base and the white both print on filament ${info.whiteTools.map(t => t + 1).join(', ')}, so there would be no picture. ` +
+               'In Orca\u2019s object list, open the blank, set the part \u201cblack base\u201d to filament 1 and \u201cwhite\u201d to filament 2, then slice again.');
     else {
       const bw = info.box[2] - info.box[0], bh = info.box[3] - info.box[1];
       if (Math.abs(bw - W) > 1.5 || Math.abs(bh - H) > 1.5)

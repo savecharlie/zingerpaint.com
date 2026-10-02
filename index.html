@@ -220,6 +220,9 @@ input[type=number] { width: 5.2rem; padding: 0.4rem 0.5rem; background: var(--in
         <ul class="how">
           <li>Open it in OrcaSlicer. It is one object in two parts: the black base on filament 1, the white on filament 2.
             Load black and white PLA to match.</li>
+          <li>Open the object in Orca&rsquo;s object list and check each part&rsquo;s filament before you slice. The
+            GUI can put both parts on one filament, and then there is no picture. Step 3 refuses a G-code like that.</li>
+          <li>Turn the prime tower off. On a blank this big the tower lands on the model and Orca won&rsquo;t slice.</li>
           <li>The blank carries its own 0.04 mm layer height. Keep the first layer at 0.2 mm.</li>
           <li>If Orca refuses the 0.04 mm layers, lower the printer profile’s minimum layer height
             (<code>min_layer_height</code>) to 0.04.</li>
